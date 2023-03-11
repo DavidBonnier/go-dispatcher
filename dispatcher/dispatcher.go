@@ -3,8 +3,11 @@
 package dispatcher
 
 import (
+	"sort"
 	"sync"
 	"time"
+
+	"github.com/DavidBonnier/queue"
 )
 
 // Dispatcher internally maintains a worker pool and runs a job dispatching loop
@@ -19,26 +22,36 @@ type Dispatcher interface {
 	// Finalize blocks until all jobs dispatched are finished and all workers are returned
 	// to worker pool. Note it must be called to terminate the dispatching loop when the
 	// dispatcher is no longer needed, and a finalized dispatcher must not be reused.
-	Finalize()
+	Finalize(priority int)
 	// GetNumWorkersAvail returns the number of workers availalbe for tasks at the time
 	// it is called.
-	GetNumWorkersAvail() int
+	GetNumWorkersAvail(priority int) int
 	// GetTotalNumWorkers returns total number of workers created by the dispatcher.
-	GetTotalNumWorkers() int
+	GetTotalNumWorkers(priority int) int
+
+	GetNumJobAvail(priority int) int
+}
+
+type DispatcherConfig struct {
+	Priority int
+	NbWorker int
 }
 
 type _Dispatcher struct {
 	sync.RWMutex
+	allPriority []int
 	wg          *sync.WaitGroup
-	workerPool  chan *_Worker
-	jobListener chan _DelayedJob
+	workerPool  map[int]chan *_Worker
+	jobListener map[int]*queue.Queue
+	notify chan struct{}
 }
 
 func (dispatcher *_Dispatcher) Dispatch(job Job) {
 	dispatcher.RLock()
 	defer dispatcher.RUnlock()
 
-	dispatcher.jobListener <- _DelayedJob{job: job}
+	dispatcher.jobListener[job.Priority()].Push(_DelayedJob{job: job})
+	dispatcher.notify <- struct{}{}
 }
 
 func (dispatcher *_Dispatcher) DispatchWithDelay(job Job, delayPeriod time.Duration) error {
@@ -49,61 +62,97 @@ func (dispatcher *_Dispatcher) DispatchWithDelay(job Job, delayPeriod time.Durat
 	dispatcher.RLock()
 	defer dispatcher.RUnlock()
 
-	dispatcher.jobListener <- _DelayedJob{job: job, delayPeriod: delayPeriod}
+	dispatcher.jobListener[job.Priority()].Push(_DelayedJob{job: job, delayPeriod: delayPeriod})
+	dispatcher.notify <- struct{}{}
 	return nil
 }
 
-func (dispatcher *_Dispatcher) Finalize() {
-	dispatcher.Lock()
-	defer dispatcher.Unlock()
-
+func (dispatcher *_Dispatcher) Finalize(priority int) {
 	// Wait for all jobs to be dispatched (to ensure wg.Add() happens before wg.Wait())
 	finishSignReceiver := make(chan _FinishSignal)
-	dispatcher.jobListener <- _DelayedJob{job: &_EmptyJob{finishSignReceiver: finishSignReceiver}}
+	job := &_EmptyJob{
+		finishSignReceiver: finishSignReceiver,
+		priority: priority,
+	}
+
+	dispatcher.Dispatch(job)
+
 	<-finishSignReceiver
 	// Wait for all workers to finish their jobs
 	dispatcher.wg.Wait()
 	// Stop job dispatching loop
-	close(dispatcher.jobListener)
+	close(dispatcher.notify)
 }
 
-func (dispatcher *_Dispatcher) GetNumWorkersAvail() int {
-	return len(dispatcher.workerPool)
+func (dispatcher *_Dispatcher) GetNumJobAvail(priority int) int {
+	return dispatcher.jobListener[priority].Length()
 }
 
-func (dispatcher *_Dispatcher) GetTotalNumWorkers() int {
-	return cap(dispatcher.workerPool)
+func (dispatcher *_Dispatcher) GetNumWorkersAvail(priority int) int {
+	return len(dispatcher.workerPool[priority])
+}
+
+func (dispatcher *_Dispatcher) GetTotalNumWorkers(priority int) int {
+	return cap(dispatcher.workerPool[priority])
 }
 
 // NewDispatcher returns a new job dispatcher with a worker pool
 // initialized with given number of workers.
-func NewDispatcher(numWorkers int) (Dispatcher, error) {
-	if numWorkers <= 0 {
-		return nil, newError("Invalid number of workers given to create a new dispatcher")
-	}
-
+func NewDispatcher(config []*DispatcherConfig) (Dispatcher, error) {
 	wg := &sync.WaitGroup{}
 	dispatcher := &_Dispatcher{wg: wg}
-	dispatcher.jobListener = make(chan _DelayedJob)
-	dispatcher.workerPool = make(chan *_Worker, numWorkers)
-	for i := 0; i < numWorkers; i++ {
+	dispatcher.notify = make(chan struct{}, 1<<30)
+	dispatcher.jobListener = make(map[int]*queue.Queue)
+	dispatcher.workerPool = make(map[int]chan *_Worker)
+
+	for _, value := range config {
+		dispatcher.allPriority = append(dispatcher.allPriority, value.Priority)
+		dispatcher.jobListener[value.Priority] = queue.New()
+		if value.NbWorker <= 0 {
+			return nil, newError("Invalid number of workers given to create a new dispatcher")
+		}
+		dispatcher.workerPool[value.Priority] = make(chan *_Worker, value.NbWorker)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(dispatcher.allPriority)))
+
+	for key, value := range dispatcher.workerPool {
 		// Register the worker in the dispatcher
-		dispatcher.workerPool <- &_Worker{wg: wg}
+		for i := 0; i < cap(value); i++ {
+			dispatcher.workerPool[key] <- &_Worker{}
+		}
 	}
 
-	go func() {
-		for delayedJob := range dispatcher.jobListener {
-			time.Sleep(delayedJob.delayPeriod)
-			worker := <-dispatcher.workerPool
-			worker.wg.Add(1)
-			go func(job Job, worker *_Worker) {
-				job.Do()
-				// Return it back to the worker pool
-				dispatcher.workerPool <- worker
-				worker.wg.Done()
-			}(delayedJob.job, worker)
-		}
-	}()
+	go dispatcher.dispatcheJob()
 
 	return dispatcher, nil
+}
+
+func (dispatcher *_Dispatcher) dispatcheJob() {
+	for _ = range dispatcher.notify {
+		var interfacePop interface{}
+		for _, key := range dispatcher.allPriority {
+			interfacePop = dispatcher.jobListener[key].Pop()
+			if interfacePop != nil {
+				break
+			}
+		}
+
+		if interfacePop == nil {
+			// Here if we have error with Queue
+			panic("Queue is empty")
+		}
+
+		var delayedJob _DelayedJob = interfacePop.(_DelayedJob)
+		time.Sleep(delayedJob.delayPeriod)
+		worker := <-dispatcher.workerPool[delayedJob.job.Priority()]
+		dispatcher.wg.Add(1)
+		go dispatcher.addJob(delayedJob.job, worker)
+	}
+}
+
+func (dispatcher *_Dispatcher) addJob(job Job, worker *_Worker) {
+	job.Do()
+	// Return it back to the worker pool
+	dispatcher.workerPool[job.Priority()] <- worker
+	dispatcher.wg.Done()
 }
