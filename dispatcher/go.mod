@@ -1,4 +1,4 @@
-module github.com/YSZhuoyang/go-dispatcher/dispatcher
+module github.com/DavidBonnier/go-dispatcher/dispatcher
 
 go 1.18
 
