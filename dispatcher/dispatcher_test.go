@@ -10,13 +10,13 @@ import (
 )
 
 const (
-	Min         = -300
-	Low         = -200
+	Min = -300
+	Low = -200
 )
 
 type testJob struct {
 	resultSender chan bool
-	priority int
+	priority     int
 }
 
 func (job *testJob) Do() {
@@ -30,7 +30,7 @@ func (job *testJob) Priority() int {
 type testBigJob struct {
 	mutex       *sync.Mutex
 	accumulator *int
-	priority int
+	priority    int
 }
 
 func (job *testBigJob) Do() {
@@ -48,14 +48,14 @@ func (job *testBigJob) Priority() int {
 func TestGoroutineLeaks(T *testing.T) {
 	assertion := assert.New(T)
 
-	config := []*DispatcherConfig {
+	config := []*DispatcherConfig{
 		{Priority: Min, NbWorker: 100},
 		{Priority: Low, NbWorker: 100},
 	}
 
 	for i := 0; i < 100; i++ {
 		disp, _ := NewDispatcher(config)
-		disp.Finalize(Min)
+		disp.Finalize()
 	}
 
 	runtime.GC()
@@ -65,7 +65,7 @@ func TestGoroutineLeaks(T *testing.T) {
 func TestInitWorkerPool(T *testing.T) {
 	assertion := assert.New(T)
 
-	config := []*DispatcherConfig {
+	config := []*DispatcherConfig{
 		{Priority: Min, NbWorker: 1000},
 		{Priority: Low, NbWorker: 100},
 	}
@@ -93,7 +93,7 @@ func TestInitWorkerPool(T *testing.T) {
 
 	// Expect an error to be returned by getting number of available workers
 	// given invalid param
-	config = []*DispatcherConfig {
+	config = []*DispatcherConfig{
 		{Priority: Min, NbWorker: 0},
 	}
 	disp, err := NewDispatcher(config)
@@ -104,7 +104,7 @@ func TestInitWorkerPool(T *testing.T) {
 		"Unexpected error returned by creating new dispatcher given invalid number of workers",
 	)
 
-	config = []*DispatcherConfig {
+	config = []*DispatcherConfig{
 		{Priority: Min, NbWorker: -1},
 	}
 	disp, err = NewDispatcher(config)
@@ -120,7 +120,7 @@ func TestFinializingJobs(T *testing.T) {
 	assertion := assert.New(T)
 	numWorkers := 100
 
-	config := []*DispatcherConfig {
+	config := []*DispatcherConfig{
 		{Priority: Min, NbWorker: numWorkers},
 		{Priority: Low, NbWorker: numWorkers},
 	}
@@ -133,7 +133,7 @@ func TestFinializingJobs(T *testing.T) {
 		disp.Dispatch(&testBigJob{accumulator: &accumulator, mutex: &mutex, priority: Low})
 	}
 
-	disp.Finalize(Min)
+	disp.Finalize()
 	assertion.Equal(accumulator, numWorkers, "Dispatcher did not wait for all jobs to complete")
 }
 
@@ -141,7 +141,7 @@ func TestFinializingDelayedJobs(T *testing.T) {
 	assertion := assert.New(T)
 	numWorkers := 100
 
-	config := []*DispatcherConfig {
+	config := []*DispatcherConfig{
 		{Priority: Min, NbWorker: numWorkers},
 		{Priority: Low, NbWorker: numWorkers},
 	}
@@ -155,7 +155,7 @@ func TestFinializingDelayedJobs(T *testing.T) {
 		disp.DispatchWithDelay(&testBigJob{accumulator: &accumulator, mutex: &mutex, priority: Low}, 50000)
 	}
 
-	disp.Finalize(Min)
+	disp.Finalize()
 	assertion.Equal(accumulator, numWorkers, "Dispatcher did not wait for all jobs to complete")
 }
 
@@ -164,7 +164,7 @@ func TestFinializingManyDelayedJobs(T *testing.T) {
 	numWorkers := 100
 	numJobs := numWorkers * 10
 
-	config := []*DispatcherConfig {
+	config := []*DispatcherConfig{
 		{Priority: Min, NbWorker: numWorkers},
 		{Priority: Low, NbWorker: numWorkers},
 	}
@@ -177,7 +177,7 @@ func TestFinializingManyDelayedJobs(T *testing.T) {
 		disp.DispatchWithDelay(&testBigJob{accumulator: &accumulator, mutex: &mutex, priority: Low}, 50000)
 	}
 
-	disp.Finalize(Min)
+	disp.Finalize()
 	assertion.Equal(accumulator, numJobs, "Dispatcher did not wait for all jobs to complete")
 }
 
@@ -185,7 +185,7 @@ func TestDispatchingJobs(T *testing.T) {
 	assertion := assert.New(T)
 	numWorkers := 100
 
-	config := []*DispatcherConfig {
+	config := []*DispatcherConfig{
 		{Priority: Min, NbWorker: numWorkers},
 		{Priority: Low, NbWorker: numWorkers},
 	}
@@ -193,12 +193,15 @@ func TestDispatchingJobs(T *testing.T) {
 	receiver := make(chan bool, numWorkers)
 	disp, _ := NewDispatcher(config)
 
+	errorDisp := disp.Dispatch(&testJob{resultSender: receiver, priority: 50})
+	assertion.Equal(errorDisp.Error(), "Invalid job priority", "Incorrect job priority for dispach job")
+
 	// Dispatch jobs
 	sum := 0
 	for i := 0; i < numWorkers; i++ {
 		disp.Dispatch(&testJob{resultSender: receiver, priority: Low})
 	}
-	disp.Finalize(Min)
+	disp.Finalize()
 	close(receiver)
 	// Verify the number of jobs being done
 	for range receiver {
@@ -212,7 +215,7 @@ func TestDispatchingJobsWithDelay(T *testing.T) {
 	numWorkers := 100
 	receiver := make(chan bool, numWorkers)
 
-	config := []*DispatcherConfig {
+	config := []*DispatcherConfig{
 		{Priority: Min, NbWorker: numWorkers},
 		{Priority: Low, NbWorker: numWorkers},
 	}
@@ -224,7 +227,7 @@ func TestDispatchingJobsWithDelay(T *testing.T) {
 	for i := 0; i < numWorkers; i++ {
 		disp.DispatchWithDelay(&testJob{resultSender: receiver, priority: Low}, 10000)
 	}
-	disp.Finalize(Min)
+	disp.Finalize()
 	elapse := time.Since(start)
 	assertion.True(elapse >= 1000000, "Job dispatching was not delayed with the correct time period")
 }
@@ -234,7 +237,7 @@ func TestDispatchingJobsWithDelayError(T *testing.T) {
 	numWorkers := 100
 	receiver := make(chan bool, numWorkers)
 
-	config := []*DispatcherConfig {
+	config := []*DispatcherConfig{
 		{Priority: Min, NbWorker: numWorkers},
 		{Priority: Low, NbWorker: numWorkers},
 	}
@@ -253,7 +256,7 @@ func TestDispatchingManyJobs(T *testing.T) {
 	assertion := assert.New(T)
 	numWorkers := 100
 
-	config := []*DispatcherConfig {
+	config := []*DispatcherConfig{
 		{Priority: Min, NbWorker: numWorkers},
 		{Priority: Low, NbWorker: numWorkers},
 	}
@@ -266,7 +269,7 @@ func TestDispatchingManyJobs(T *testing.T) {
 		for i := 0; i < numJobs; i++ {
 			disp.Dispatch(&testJob{resultSender: receiver, priority: Low})
 		}
-		disp.Finalize(Min)
+		disp.Finalize()
 		close(receiver)
 	}(numJobs)
 

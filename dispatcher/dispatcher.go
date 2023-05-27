@@ -15,20 +15,20 @@ import (
 type Dispatcher interface {
 	// Dispatch gives a job to a worker at a time, and blocks until at least one worker
 	// becomes available. Each job dispatched is handled by a separate goroutine.
-	Dispatch(job Job)
+	Dispatch(job Job) error
 	// DispatchWithDelay behaves similarly to Dispatch, except it is delayed for a given
 	// period of time (in nanoseconds) before the job is allocated to a worker.
 	DispatchWithDelay(job Job, delayPeriod time.Duration) error
 	// Finalize blocks until all jobs dispatched are finished and all workers are returned
 	// to worker pool. Note it must be called to terminate the dispatching loop when the
 	// dispatcher is no longer needed, and a finalized dispatcher must not be reused.
-	Finalize(priority int)
+	Finalize() error
 	// GetNumWorkersAvail returns the number of workers availalbe for tasks at the time
 	// it is called.
 	GetNumWorkersAvail(priority int) int
 	// GetTotalNumWorkers returns total number of workers created by the dispatcher.
 	GetTotalNumWorkers(priority int) int
-
+	// GetNumJobAvail returns the current number of workers
 	GetNumJobAvail(priority int) int
 }
 
@@ -43,15 +43,21 @@ type _Dispatcher struct {
 	wg          *sync.WaitGroup
 	workerPool  map[int]chan *_Worker
 	jobListener map[int]*queue.Queue
-	notify chan struct{}
+	notify      chan struct{}
 }
 
-func (dispatcher *_Dispatcher) Dispatch(job Job) {
-	dispatcher.RLock()
-	defer dispatcher.RUnlock()
+func (dispatcher *_Dispatcher) Dispatch(job Job) error {
+	dispatcher.Lock()
+	defer dispatcher.Unlock()
 
-	dispatcher.jobListener[job.Priority()].Push(_DelayedJob{job: job})
+	queue, exists := dispatcher.jobListener[job.Priority()]
+	if !exists {
+		return newError("Invalid job priority")
+	}
+	queue.Push(_DelayedJob{job: job})
+
 	dispatcher.notify <- struct{}{}
+	return nil
 }
 
 func (dispatcher *_Dispatcher) DispatchWithDelay(job Job, delayPeriod time.Duration) error {
@@ -59,33 +65,50 @@ func (dispatcher *_Dispatcher) DispatchWithDelay(job Job, delayPeriod time.Durat
 		return newError("Invalid delay period")
 	}
 
-	dispatcher.RLock()
-	defer dispatcher.RUnlock()
+	dispatcher.Lock()
+	defer dispatcher.Unlock()
 
-	dispatcher.jobListener[job.Priority()].Push(_DelayedJob{job: job, delayPeriod: delayPeriod})
+	queue, exists := dispatcher.jobListener[job.Priority()]
+	if !exists {
+		return newError("Invalid job priority")
+	}
+
+	queue.Push(_DelayedJob{job: job, delayPeriod: delayPeriod})
 	dispatcher.notify <- struct{}{}
 	return nil
 }
 
-func (dispatcher *_Dispatcher) Finalize(priority int) {
+func (dispatcher *_Dispatcher) Finalize() error {
 	// Wait for all jobs to be dispatched (to ensure wg.Add() happens before wg.Wait())
 	finishSignReceiver := make(chan _FinishSignal)
 	job := &_EmptyJob{
 		finishSignReceiver: finishSignReceiver,
-		priority: priority,
+		priority:           dispatcher.allPriority[len(dispatcher.allPriority)-1],
 	}
 
-	dispatcher.Dispatch(job)
+	errorDisp := dispatcher.Dispatch(job)
+	if errorDisp != nil {
+		return errorDisp
+	}
 
 	<-finishSignReceiver
 	// Wait for all workers to finish their jobs
 	dispatcher.wg.Wait()
 	// Stop job dispatching loop
 	close(dispatcher.notify)
+
+	return nil
 }
 
 func (dispatcher *_Dispatcher) GetNumJobAvail(priority int) int {
-	return dispatcher.jobListener[priority].Length()
+	dispatcher.RLock()
+	defer dispatcher.RUnlock()
+
+	queue, exists := dispatcher.jobListener[priority]
+	if !exists {
+		return 0
+	}
+	return queue.Length()
 }
 
 func (dispatcher *_Dispatcher) GetNumWorkersAvail(priority int) int {
@@ -130,12 +153,14 @@ func NewDispatcher(config []*DispatcherConfig) (Dispatcher, error) {
 func (dispatcher *_Dispatcher) dispatcheJob() {
 	for _ = range dispatcher.notify {
 		var interfacePop interface{}
+		dispatcher.Lock()
 		for _, key := range dispatcher.allPriority {
 			interfacePop = dispatcher.jobListener[key].Pop()
 			if interfacePop != nil {
 				break
 			}
 		}
+		dispatcher.Unlock()
 
 		if interfacePop == nil {
 			// Here if we have error with Queue
