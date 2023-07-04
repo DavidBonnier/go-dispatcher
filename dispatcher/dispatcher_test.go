@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	Min = -300
-	Low = -200
+	Min           = -300
+	Low           = -200
+	ErrorPriority = 50
 )
 
 type testJob struct {
@@ -89,6 +90,16 @@ func TestInitWorkerPool(T *testing.T) {
 	assertion.Equal(totalNumWorkers, 100)
 
 	numJobAvail = disp.GetNumJobAvail(Low)
+	assertion.Equal(numJobAvail, 0)
+
+	// Expect 0 for bad priority
+	numWorkersAvail = disp.GetNumWorkersAvail(ErrorPriority)
+	assertion.Equal(numWorkersAvail, 0)
+
+	totalNumWorkers = disp.GetTotalNumWorkers(ErrorPriority)
+	assertion.Equal(totalNumWorkers, 0)
+
+	numJobAvail = disp.GetNumJobAvail(ErrorPriority)
 	assertion.Equal(numJobAvail, 0)
 
 	// Expect an error to be returned by getting number of available workers
@@ -193,7 +204,7 @@ func TestDispatchingJobs(T *testing.T) {
 	receiver := make(chan bool, numWorkers)
 	disp, _ := NewDispatcher(config)
 
-	errorDisp := disp.Dispatch(&testJob{resultSender: receiver, priority: 50})
+	errorDisp := disp.Dispatch(&testJob{resultSender: receiver, priority: ErrorPriority})
 	assertion.Equal(errorDisp.Error(), "Invalid job priority", "Incorrect job priority for dispach job")
 
 	// Dispatch jobs
@@ -250,6 +261,9 @@ func TestDispatchingJobsWithDelayError(T *testing.T) {
 		"Invalid delay period",
 		"Unexpected error returned by dispatch given invalid delay period",
 	)
+
+	errorDisp := disp.DispatchWithDelay(&testJob{resultSender: receiver, priority: ErrorPriority}, 1)
+	assertion.Equal(errorDisp.Error(), "Invalid job priority", "Incorrect job priority for dispach job")
 }
 
 func TestDispatchingManyJobs(T *testing.T) {

@@ -112,11 +112,25 @@ func (dispatcher *_Dispatcher) GetNumJobAvail(priority int) int {
 }
 
 func (dispatcher *_Dispatcher) GetNumWorkersAvail(priority int) int {
-	return len(dispatcher.workerPool[priority])
+	dispatcher.RLock()
+	defer dispatcher.RUnlock()
+
+	workers, exists := dispatcher.workerPool[priority]
+	if !exists {
+		return 0
+	}
+	return len(workers)
 }
 
 func (dispatcher *_Dispatcher) GetTotalNumWorkers(priority int) int {
-	return cap(dispatcher.workerPool[priority])
+	dispatcher.RLock()
+	defer dispatcher.RUnlock()
+
+	workers, exists := dispatcher.workerPool[priority]
+	if !exists {
+		return 0
+	}
+	return cap(workers)
 }
 
 // NewDispatcher returns a new job dispatcher with a worker pool
