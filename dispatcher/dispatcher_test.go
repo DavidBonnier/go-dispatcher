@@ -28,21 +28,35 @@ func (job *testJob) Priority() int {
 	return job.priority
 }
 
-type testBigJob struct {
+type testAccumulatorJob struct {
 	mutex       *sync.Mutex
 	accumulator *int
 	priority    int
 }
 
-func (job *testBigJob) Do() {
+func (job *testAccumulatorJob) Do() {
 	job.mutex.Lock()
 	defer job.mutex.Unlock()
 
-	time.Sleep(50000)
+	time.Sleep(50 * time.Microsecond)
 	*job.accumulator++
 }
 
-func (job *testBigJob) Priority() int {
+func (job *testAccumulatorJob) Priority() int {
+	return job.priority
+}
+
+type testSimpleJob struct {
+	resultSender chan bool
+	priority     int
+}
+
+func (job *testSimpleJob) Do() {
+	time.Sleep(4 * time.Millisecond)
+	job.resultSender <- true
+}
+
+func (job *testSimpleJob) Priority() int {
 	return job.priority
 }
 
@@ -141,7 +155,7 @@ func TestFinializingJobs(T *testing.T) {
 	accumulator := 0
 	for i := 0; i < numWorkers; i++ {
 		// Each big job takes 50000 ns to finish
-		disp.Dispatch(&testBigJob{accumulator: &accumulator, mutex: &mutex, priority: Low})
+		disp.Dispatch(&testAccumulatorJob{accumulator: &accumulator, mutex: &mutex, priority: Low})
 	}
 
 	disp.Finalize()
@@ -163,7 +177,7 @@ func TestFinializingDelayedJobs(T *testing.T) {
 	accumulator := 0
 	for i := 0; i < numWorkers; i++ {
 		// Each big job takes 50000 ns to finish
-		disp.DispatchWithDelay(&testBigJob{accumulator: &accumulator, mutex: &mutex, priority: Low}, 50000)
+		disp.DispatchWithDelay(&testAccumulatorJob{accumulator: &accumulator, mutex: &mutex, priority: Low}, 50000)
 	}
 
 	disp.Finalize()
@@ -185,7 +199,7 @@ func TestFinializingManyDelayedJobs(T *testing.T) {
 	accumulator := 0
 	for i := 0; i < numJobs; i++ {
 		// Each big job takes 50000 ns to finish
-		disp.DispatchWithDelay(&testBigJob{accumulator: &accumulator, mutex: &mutex, priority: Low}, 50000)
+		disp.DispatchWithDelay(&testAccumulatorJob{accumulator: &accumulator, mutex: &mutex, priority: Low}, 50000)
 	}
 
 	disp.Finalize()
@@ -293,4 +307,40 @@ func TestDispatchingManyJobs(T *testing.T) {
 		sum++
 	}
 	assertion.Equal(numJobs, sum, "Incorrect number of job executed")
+}
+
+func TestDispatchingJobsMultiPriority(T *testing.T) {
+	assertion := assert.New(T)
+	numWorkers := 10
+
+	config := []*DispatcherConfig{
+		{Priority: Min, NbWorker: numWorkers},
+		{Priority: Low, NbWorker: numWorkers},
+	}
+
+	numJobs := numWorkers * 20
+	receiver := make(chan bool, numWorkers)
+	disp, _ := NewDispatcher(config)
+
+	go func(numJobs int) {
+		for i := 0; i < numJobs/2; i++ {
+			disp.Dispatch(&testSimpleJob{resultSender: receiver, priority: Min})
+		}
+		time.Sleep(7 * time.Millisecond)
+		for i := 0; i < numJobs; i++ {
+			disp.Dispatch(&testSimpleJob{resultSender: receiver, priority: Low})
+		}
+		for i := 0; i < numJobs/2; i++ {
+			disp.Dispatch(&testSimpleJob{resultSender: receiver, priority: Min})
+		}
+		disp.Finalize()
+		close(receiver)
+	}(numJobs)
+
+	sum := 0
+	// Verify the number of jobs being done
+	for range receiver {
+		sum++
+	}
+	assertion.Equal(numJobs*2, sum, "Incorrect number of job executed")
 }
